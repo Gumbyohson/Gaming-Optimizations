@@ -1077,34 +1077,27 @@ function Get-CPUManufacturer {
 }
 
 # Detect GPU manufacturer
-function Get-GPUManufacturer {
-    if ($script:GPUManufacturer) { return $script:GPUManufacturer }
-    
+function Get-GPUManufacturers {
     try {
-        $gpu = Get-CimInstance -ClassName Win32_VideoController | Where-Object { $_.Name -notmatch 'Microsoft|Remote|Virtual' } | Select-Object -First 1
-        $name = $gpu.Name.ToLower()
-        
-        if ($name -match 'nvidia|geforce|quadro|rtx|gtx') {
-            $script:GPUManufacturer = 'NVIDIA'
+        $gpus = Get-CimInstance -ClassName Win32_VideoController | Where-Object { $_.Name -notmatch 'Microsoft|Remote|Virtual' }
+        $vendors = @()
+        foreach ($gpu in $gpus) {
+            $name = $gpu.Name.ToLower()
+            if ($name -match 'nvidia|geforce|quadro|rtx|gtx') {
+                $vendors += 'NVIDIA'
+            } elseif ($name -match 'amd|radeon|rx ') {
+                $vendors += 'AMD'
+            } elseif ($name -match 'intel.*arc|intel.*xe|intel') {
+                $vendors += 'Intel'
+            } else {
+                $vendors += 'Unknown'
+            }
+            Write-Log "Detected GPU: $($gpu.Name)" "INFO"
         }
-        elseif ($name -match 'amd|radeon|rx ') {
-            $script:GPUManufacturer = 'AMD'
-        }
-        elseif ($name -match 'intel.*arc|intel.*xe') {
-            $script:GPUManufacturer = 'Intel'
-        }
-        else {
-            $script:GPUManufacturer = 'Unknown'
-        }
-        
-        Write-Log "Detected GPU: $($gpu.Name)" "INFO"
-        Write-Log "GPU Manufacturer: $script:GPUManufacturer" "INFO"
-        
-        return $script:GPUManufacturer
-    }
-    catch {
-        Write-Log "Failed to detect GPU manufacturer: $_" "WARNING"
-        return 'Unknown'
+        return ($vendors | Select-Object -Unique)
+    } catch {
+        Write-Log "Failed to detect GPU manufacturers: $_" "WARNING"
+        return @('Unknown')
     }
 }
 
@@ -2561,61 +2554,66 @@ function Invoke-CPUBenchmark {
         # Create a scriptblock for the CPU stress work - each runspace runs this independently
         $stressBlock = {
             param($Duration, $SyncHash, $ThreadId)
-            $loopStart = Get-Date
-            $iterations = 0
-            $lastUpdate = Get-Date
-            
-            # Extremely heavy CPU work: prime number calculation and math operations
-            while (((Get-Date) - $loopStart).TotalSeconds -lt $Duration) {
-                # Prime number calculation (extremely heavy workload)
-                $testNum = 2
-                for ($j = 0; $j -lt 10000; $j++) {
-                    $root = [Math]::Sqrt($testNum)
-                    $divisors = 0
-                    for ($i = 2; $i -le $root; $i++) {
-                        if ($testNum % $i -eq 0) { $divisors++ }
+            $gpuMans = Get-GPUManufacturers
+            Write-Log "" "INFO"
+            Write-Log "========================================" "INFO"
+            Write-Log "GPU-Specific Recommendations" "INFO"
+            Write-Log "========================================" "INFO"
+            if ($gpuMans.Count -eq 0) {
+                Write-Log "No GPUs detected." "WARNING"
+            } else {
+                Write-Log "Detected GPU(s): $($gpuMans -join ', ')" "INFO"
+                foreach ($gpuMan in $gpuMans) {
+                    switch ($gpuMan) {
+                        'NVIDIA' {
+                            Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
+                            Write-Log "" "INFO"
+                            Write-Log "NVIDIA Control Panel Settings:" "INFO"
+                            Write-Log "  - Enable G-SYNC (if supported)" "INFO"
+                            Write-Log "  - Low Latency Mode: On" "INFO"
+                            Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
+                            Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
+                            Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
+                            Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
+                            Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
+                            Write-Log "" "INFO"
+                            Write-Log "In-Game Settings:" "INFO"
+                            Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
+                            Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
+                            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                            Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
+                        }
+                        'AMD' {
+                            Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
+                            Write-Log "" "INFO"
+                            Write-Log "AMD Adrenalin Software Settings:" "INFO"
+                            Write-Log "  - Enable FreeSync (if supported)" "INFO"
+                            Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
+                            Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
+                            Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
+                            Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
+                            Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
+                            Write-Log "" "INFO"
+                            Write-Log "In-Game Settings:" "INFO"
+                            Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
+                            Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
+                            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                            Write-Log "  - Disable in-game V-Sync" "INFO"
+                            Write-Log "" "INFO"
+                            Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
+                            Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
+                        }
+                        'Intel' {
+                            Write-Log "Intel GPU detected" "INFO"
+                            Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
+                            Write-Log "  - Configure Intel Graphics Command Center for gaming" "INFO"
+                        }
+                        default {
+                            Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+                        }
                     }
-                    $testNum++
-                    $iterations++
-                }
-                
-                # Massive floating point math to stress FPU continuously
-                $x = 1.0
-                for ($k = 0; $k -lt 100000; $k++) {
-                    $x = [math]::Sqrt($x * 2.0) + [math]::Sin($x) + [math]::Cos($x * 0.5)
-                    $x = [math]::Atan($x) + [math]::Log($x + 1.1)
-                    $x = [math]::Pow($x, 1.1) + [math]::Tan($x * 0.1)
-                    $iterations++
-                }
-                
-                # Additional matrix-style calculations for sustained load
-                for ($m = 0; $m -lt 5000; $m++) {
-                    $a = $m * 0.001
-                    $b = [Math]::Sin($a) * [Math]::Cos($a * 2.0)
-                    $c = [Math]::Sqrt([Math]::Abs($b) + 1.0)
-                    $d = [Math]::Log($c + 1.0) * [Math]::Exp($a * 0.01)
-                    $iterations++
-                }
-                
-                # Update shared counter every 100ms to reduce lock contention
-                if (((Get-Date) - $lastUpdate).TotalMilliseconds -ge 100) {
-                    $SyncHash['TotalIterations'] = $SyncHash['TotalIterations'] + ($iterations - $SyncHash["Thread_$ThreadId"])
-                    $SyncHash["Thread_$ThreadId"] = $iterations
-                    $lastUpdate = Get-Date
                 }
             }
-            
-            # Final update
-            $SyncHash['TotalIterations'] = $SyncHash['TotalIterations'] + ($iterations - $SyncHash["Thread_$ThreadId"])
-            $SyncHash["Thread_$ThreadId"] = $iterations
-            $SyncHash["Thread_${ThreadId}_Final"] = $iterations
-        }
-        
-        # Create synchronized hashtable for cross-runspace communication
-        $syncHash = [hashtable]::Synchronized(@{
-            TotalIterations = 0
-        })
-        
         # Create runspace pool with one runspace per logical processor
         $numCores = $cpu.NumberOfLogicalProcessors
         $runspacePool = [runspacefactory]::CreateRunspacePool(1, $numCores)
@@ -2807,18 +2805,15 @@ function Invoke-CPUBenchmark {
         $mathDuration = 10
         $expectedMaxMathOps = 700000  # Expected max math ops/sec per core
         $numCores = $cpu.NumberOfLogicalProcessors
-        $syncObj = [hashtable]::Synchronized(@{
-            StartSignal = $false
-            MathCounts = @{}
-        })
+        $mathSyncHash = [hashtable]::Synchronized(@{})
+        for ($i = 0; $i -lt $numCores; $i++) { $mathSyncHash["Thread_$i"] = 0 }
         $mathBlock = {
-            param($Duration, $SyncObj, $ThreadId)
-            while (-not $SyncObj.StartSignal) { Start-Sleep -Milliseconds 5 }
+            param($Duration, $SyncHash, $ThreadId)
             $loopStart = [DateTime]::UtcNow
             $mathOps = 0
             $pi = 3.14159265359
             $e = 2.71828182846
-            $lastOutputTime = [DateTime]::UtcNow
+            $lastUpdate = [DateTime]::UtcNow
             while (([DateTime]::UtcNow - $loopStart).TotalSeconds -lt $Duration) {
                 for ($i = 0; $i -lt 100000; $i++) {
                     $x = $i * 0.001
@@ -2827,34 +2822,42 @@ function Invoke-CPUBenchmark {
                     $result = [Math]::Log($result + 10) * $e / $pi
                     $mathOps++
                 }
-                if (([DateTime]::UtcNow - $lastOutputTime).TotalMilliseconds -ge 100) {
-                    $SyncObj.MathCounts[$ThreadId] = $mathOps
-                    $lastOutputTime = [DateTime]::UtcNow
+                if (([DateTime]::UtcNow - $lastUpdate).TotalMilliseconds -ge 100) {
+                    $SyncHash["Thread_$ThreadId"] = $mathOps
+                    $lastUpdate = [DateTime]::UtcNow
                 }
             }
-            $SyncObj.MathCounts[$ThreadId] = $mathOps
+            $SyncHash["Thread_$ThreadId"] = $mathOps
         }
-        $mathJobs = @()
+        $mathRunspacePool = [runspacefactory]::CreateRunspacePool(1, $numCores)
+        $mathRunspacePool.Open()
+        $mathRunspaces = @()
         for ($i = 0; $i -lt $numCores; $i++) {
-            $syncObj.MathCounts[$i] = 0
-            $job = Start-Job -ScriptBlock $mathBlock -ArgumentList $mathDuration, $syncObj, $i
-            $mathJobs += $job
+            $powershell = [powershell]::Create().AddScript($mathBlock).AddArgument($mathDuration).AddArgument($mathSyncHash).AddArgument($i)
+            $powershell.RunspacePool = $mathRunspacePool
+            $mathRunspaces += [PSCustomObject]@{
+                PowerShell = $powershell
+                Handle = $powershell.BeginInvoke()
+                ThreadId = $i
+            }
         }
-        # Wait for all jobs to be ready
-        Start-Sleep -Milliseconds 100
         $mathStartTime = [DateTime]::UtcNow
-        $syncObj.StartSignal = $true
         $lastMathUpdate = [DateTime]::UtcNow
-        $lastMathCounts = @{}
-        while (([DateTime]::UtcNow - $mathStartTime).TotalSeconds -lt $mathDuration) {
+        while ($true) {
+            $allCompleted = $true
+            foreach ($rs in $mathRunspaces) {
+                if (-not $rs.Handle.IsCompleted) {
+                    $allCompleted = $false
+                    break
+                }
+            }
+            $elapsed = [Math]::Max(([DateTime]::UtcNow - $mathStartTime).TotalSeconds, 0.1)
+            $remaining = [Math]::Max($mathDuration - $elapsed, 0)
             $timeSinceUpdate = ([DateTime]::UtcNow - $lastMathUpdate).TotalMilliseconds
             if ($timeSinceUpdate -ge 200) {
-                $elapsed = [Math]::Max(([DateTime]::UtcNow - $mathStartTime).TotalSeconds, 0.1)
-                $remaining = [Math]::Max($mathDuration - $elapsed, 0)
                 $currentOpsPerSec = 0
                 for ($i = 0; $i -lt $numCores; $i++) {
-                    $val = $syncObj.MathCounts[$i]
-                    $lastMathCounts[$i] = $val
+                    $val = $mathSyncHash["Thread_$i"]
                     $currentOpsPerSec += $val / $elapsed
                 }
                 $currentOpsPerSec = [Math]::Round($currentOpsPerSec, 0)
@@ -2866,14 +2869,17 @@ function Invoke-CPUBenchmark {
                 Write-ProgressLine "  Math Load Test:  [$bar] $currentOpsPerSec ops/sec | $remainingDisplay remaining" 'Cyan'
                 $lastMathUpdate = [DateTime]::UtcNow
             }
+            if ($allCompleted -or $elapsed -ge $mathDuration) { break }
+            Start-Sleep -Milliseconds 50
         }
-        $mathJobs | Wait-Job | Out-Null
         $mathEndTime = [DateTime]::UtcNow
         $mathOps = 0
         for ($i = 0; $i -lt $numCores; $i++) {
-            $mathOps += $syncObj.MathCounts[$i]
+            $mathOps += $mathSyncHash["Thread_$i"]
         }
-        foreach ($job in $mathJobs) { Remove-Job -Job $job -ErrorAction SilentlyContinue }
+        foreach ($rs in $mathRunspaces) { try { $rs.PowerShell.EndInvoke($rs.Handle) | Out-Null } catch {} $rs.PowerShell.Dispose() }
+        $mathRunspacePool.Close()
+        $mathRunspacePool.Dispose()
         $mathDurationActual = ($mathEndTime - $mathStartTime).TotalSeconds
         $mathOpsPerSecond = [math]::Round($mathOps / $mathDurationActual, 0)
         $finalMathPercent = [Math]::Min(($mathOpsPerSecond / ($expectedMaxMathOps * $numCores)) * 100, 100)
