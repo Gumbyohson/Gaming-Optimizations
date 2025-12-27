@@ -380,12 +380,12 @@ function Resolve-BaselineResultsPath {
     try {
         # Find the most recent timestamped benchmark result (exclude "-after.json")
         $candidates = @()
-        
+
         # Check script directory
         if (Test-Path $ResultsPath) {
             $candidates += Get-ChildItem -Path $ResultsPath -Filter 'Gaming-Optimization-Benchmark-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*-after.json' }
         }
-        
+
         # Check Archive directory
         $archiveDir = Join-Path $ResultsPath 'Archive'
         if (Test-Path $archiveDir) {
@@ -394,7 +394,15 @@ function Resolve-BaselineResultsPath {
 
         if ($candidates -and $candidates.Count -gt 0) {
             $latest = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($latest) { return $latest.FullName }
+            if ($latest) {
+                # Validate file: must be non-empty and valid JSON with expected structure
+                if ($latest.Length -gt 50) { # Arbitrary small size check
+                    $results = Import-BenchmarkResults -FilePath $latest.FullName
+                    if ($results -and $results.Results) {
+                        return $latest.FullName
+                    }
+                }
+            }
         }
     } catch {
         Write-Debug "Resolve-BaselineResultsPath error: $_"
@@ -2796,22 +2804,22 @@ function Invoke-CPUBenchmark {
         Write-Log "CPU: $cpuLoadOpsPerSecond ops/sec | Clock: $idleClockSpeed MHz -> $loadClockSpeed MHz (+$boostPercent%)" "SUCCESS"
         
         # Test 2: Mathematical operations (multi-threaded pure compute intensive)
-        
         $mathDuration = 10
-        $mathStartTime = Get-Date
-        $lastMathUpdate = Get-Date
-        
-        # Create a scriptblock for math operations - run on all cores
+        $expectedMaxMathOps = 700000  # Expected max math ops/sec per core
+        $numCores = $cpu.NumberOfLogicalProcessors
+        $syncObj = [hashtable]::Synchronized(@{
+            StartSignal = $false
+            MathCounts = @{}
+        })
         $mathBlock = {
-            param($Duration)
-            $loopStart = Get-Date
+            param($Duration, $SyncObj, $ThreadId)
+            while (-not $SyncObj.StartSignal) { Start-Sleep -Milliseconds 5 }
+            $loopStart = [DateTime]::UtcNow
             $mathOps = 0
             $pi = 3.14159265359
             $e = 2.71828182846
-            $lastOutputTime = Get-Date
-            
-            # Perform intensive floating-point calculations
-            while (((Get-Date) - $loopStart).TotalSeconds -lt $Duration) {
+            $lastOutputTime = [DateTime]::UtcNow
+            while (([DateTime]::UtcNow - $loopStart).TotalSeconds -lt $Duration) {
                 for ($i = 0; $i -lt 100000; $i++) {
                     $x = $i * 0.001
                     $result = [Math]::Pow($x, 2) + [Math]::Sqrt($x + 1)
@@ -2819,89 +2827,60 @@ function Invoke-CPUBenchmark {
                     $result = [Math]::Log($result + 10) * $e / $pi
                     $mathOps++
                 }
-                
-                # Output intermediate count every 100ms
-                if (((Get-Date) - $lastOutputTime).TotalMilliseconds -ge 100) {
-                    Write-Output $mathOps
-                    $lastOutputTime = Get-Date
+                if (([DateTime]::UtcNow - $lastOutputTime).TotalMilliseconds -ge 100) {
+                    $SyncObj.MathCounts[$ThreadId] = $mathOps
+                    $lastOutputTime = [DateTime]::UtcNow
                 }
             }
-            
-            # Return final count
-            Write-Output $mathOps
+            $SyncObj.MathCounts[$ThreadId] = $mathOps
         }
-        
-        # Start math test on all logical processors
         $mathJobs = @()
-        for ($i = 0; $i -lt $cpu.NumberOfLogicalProcessors; $i++) {
-            $job = Start-Job -ScriptBlock $mathBlock -ArgumentList $mathDuration
+        for ($i = 0; $i -lt $numCores; $i++) {
+            $syncObj.MathCounts[$i] = 0
+            $job = Start-Job -ScriptBlock $mathBlock -ArgumentList $mathDuration, $syncObj, $i
             $mathJobs += $job
         }
-        
-        # Collect results from all math jobs
-        $expectedMaxMathOps = 700000  # Expected max math ops/sec per core
+        # Wait for all jobs to be ready
+        Start-Sleep -Milliseconds 100
+        $mathStartTime = [DateTime]::UtcNow
+        $syncObj.StartSignal = $true
+        $lastMathUpdate = [DateTime]::UtcNow
         $lastMathCounts = @{}
-        while (((Get-Date) - $mathStartTime).TotalSeconds -lt $mathDuration) {
-            
-            # Update progress display every 200ms
-            $timeSinceUpdate = ((Get-Date) - $lastMathUpdate).TotalMilliseconds
+        while (([DateTime]::UtcNow - $mathStartTime).TotalSeconds -lt $mathDuration) {
+            $timeSinceUpdate = ([DateTime]::UtcNow - $lastMathUpdate).TotalMilliseconds
             if ($timeSinceUpdate -ge 200) {
-                $elapsed = [Math]::Max(((Get-Date) - $mathStartTime).TotalSeconds, 0.1)
+                $elapsed = [Math]::Max(([DateTime]::UtcNow - $mathStartTime).TotalSeconds, 0.1)
                 $remaining = [Math]::Max($mathDuration - $elapsed, 0)
-                
-                # Collect intermediate results from jobs
                 $currentOpsPerSec = 0
-                foreach ($j in $mathJobs) {
-                    # Keep outputs so we can sample without losing history; avoid zeros when jobs haven't emitted recently
-                    $results = $j | Receive-Job -Keep -ErrorAction SilentlyContinue
-                    if ($results) {
-                        $lastVal = $results[-1] -as [int]
-                        $lastMathCounts[$j.Id] = $lastVal
-                    }
-
-                    if ($lastMathCounts.ContainsKey($j.Id)) {
-                        $currentOpsPerSec += $lastMathCounts[$j.Id] / $elapsed
-                    }
+                for ($i = 0; $i -lt $numCores; $i++) {
+                    $val = $syncObj.MathCounts[$i]
+                    $lastMathCounts[$i] = $val
+                    $currentOpsPerSec += $val / $elapsed
                 }
-                
                 $currentOpsPerSec = [Math]::Round($currentOpsPerSec, 0)
-                $perfPercent = [Math]::Min(($currentOpsPerSec / ($expectedMaxMathOps * $cpu.NumberOfLogicalProcessors)) * 100, 100)
-                
+                $perfPercent = [Math]::Min(($currentOpsPerSec / ($expectedMaxMathOps * $numCores)) * 100, 100)
                 $barLength = 40
                 $filledLength = [Math]::Round($barLength * $perfPercent / 100)
                 $bar = "#" * $filledLength + "." * ($barLength - $filledLength)
                 $remainingDisplay = if ($remaining -lt 1) { "<1s" } else { "$([int]$remaining)s" }
-                
                 Write-ProgressLine "  Math Load Test:  [$bar] $currentOpsPerSec ops/sec | $remainingDisplay remaining" 'Cyan'
-                $lastMathUpdate = Get-Date
+                $lastMathUpdate = [DateTime]::UtcNow
             }
         }
-        
-        # Wait for all math jobs to complete
         $mathJobs | Wait-Job | Out-Null
-
-        # Collect final results from all jobs (use kept outputs to avoid missing last samples)
+        $mathEndTime = [DateTime]::UtcNow
         $mathOps = 0
-        foreach ($job in $mathJobs) {
-            $results = $job | Receive-Job -Keep -ErrorAction SilentlyContinue
-            if ($results) {
-                $mathOps += ($results[-1] -as [int])
-            } elseif ($lastMathCounts.ContainsKey($job.Id)) {
-                $mathOps += $lastMathCounts[$job.Id]
-            }
-            Remove-Job -Job $job -ErrorAction SilentlyContinue
+        for ($i = 0; $i -lt $numCores; $i++) {
+            $mathOps += $syncObj.MathCounts[$i]
         }
-        
-        $mathEndTime = Get-Date
+        foreach ($job in $mathJobs) { Remove-Job -Job $job -ErrorAction SilentlyContinue }
         $mathDurationActual = ($mathEndTime - $mathStartTime).TotalSeconds
-        
         $mathOpsPerSecond = [math]::Round($mathOps / $mathDurationActual, 0)
-        $finalMathPercent = [Math]::Min(($mathOpsPerSecond / $expectedMaxMathOps) * 100, 100)
+        $finalMathPercent = [Math]::Min(($mathOpsPerSecond / ($expectedMaxMathOps * $numCores)) * 100, 100)
         $barLength = 40
         $filledLength = [Math]::Round($barLength * $finalMathPercent / 100)
         $finalMathBar = "#" * $filledLength + "." * ($barLength - $filledLength)
         Write-Host "`r  Math Load Test:  [$finalMathBar] $mathOpsPerSecond ops/sec | Complete        " -ForegroundColor Cyan
-        
         Write-Host "  Math Operations:   " -ForegroundColor Cyan -NoNewline
         Write-Host "$mathOpsPerSecond ops/sec" -ForegroundColor White
         Write-Log "Math: $mathOpsPerSecond ops/sec" "SUCCESS"
