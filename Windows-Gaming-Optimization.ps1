@@ -1054,7 +1054,7 @@ function Get-CPUManufacturer {
     try {
         $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
         $name = $cpu.Name.ToLower()
-        
+
         if ($name -match 'intel') {
             $script:CPUManufacturer = 'Intel'
         }
@@ -1098,6 +1098,163 @@ function Get-GPUManufacturers {
     } catch {
         Write-Log "Failed to detect GPU manufacturers: $_" "WARNING"
         return @('Unknown')
+    }
+}
+
+##############################################################################
+# Hybrid GPU helpers
+#
+# These helpers detect hybrid (iGPU + dGPU) laptop configurations and provide
+# interactive guidance. Use `Test-HybridGPU` to enumerate adapters and
+# `Show-HybridGPUGuidance` to present recommendations and quick actions.
+##############################################################################
+function Test-HybridGPU {
+    try {
+        $adapters = Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterCompatibility, PNPDeviceID, VideoProcessor, DriverVersion
+
+        $iGPUs = @()
+        $dGPUs = @()
+
+        foreach ($a in $adapters) {
+            $name = ($a.Name -as [string]) -or ""
+            $vendor = ($a.AdapterCompatibility -as [string]) -or ""
+
+            if ($name -match 'Intel' -or $vendor -match 'Intel') {
+                $iGPUs += $a
+            } elseif ($name -match 'NVIDIA' -or $vendor -match 'NVIDIA' -or $name -match 'AMD' -or $vendor -match 'AMD' -or $name -match 'Radeon') {
+                $dGPUs += $a
+            } else {
+                # Heuristic: treat unknowns with 'Microsoft' or 'Basic' as integrated fallbacks
+                if ($vendor -match 'Microsoft' -or $name -match 'Basic' -or $name -match 'Microsoft') { $iGPUs += $a } else { $dGPUs += $a }
+            }
+        }
+
+        $isHybrid = ($iGPUs.Count -gt 0 -and $dGPUs.Count -gt 0)
+
+        return @{ IsHybrid = $isHybrid; Integrated = $iGPUs; Discrete = $dGPUs; AllAdapters = $adapters }
+    }
+    catch {
+        Write-Log "Failed to detect GPU adapters: $_" "WARNING"
+        return @{ IsHybrid = $false; Integrated = @(); Discrete = @(); AllAdapters = @() }
+    }
+}
+
+# Show guidance to the user for hybrid GPU systems and optionally open Graphics Settings
+function Show-HybridGPUGuidance {
+    param([Hashtable]$HybridInfo)
+
+    if (-not $HybridInfo) { return }
+
+    if ($HybridInfo.IsHybrid) {
+        Write-Log "Hybrid GPU configuration detected" "WARNING"
+        Write-Log "  Integrated GPU(s): $($HybridInfo.Integrated | ForEach-Object { $_.Name } -join ', ')" "INFO"
+        Write-Log "  Discrete GPU(s): $($HybridInfo.Discrete | ForEach-Object { $_.Name } -join ', ')" "INFO"
+
+        Write-Log "Recommendations to ensure games/benchmarks use the discrete GPU:" "INFO"
+        Write-Log "  - Open Windows Settings -> System -> Display -> Graphics -> set your game to 'High performance' (maps to dGPU)" "INFO"
+        Write-Log "  - Or configure per-app settings in your GPU vendor control panel (NVIDIA/AMD/Intel)" "INFO"
+        Write-Log "  - Plug into AC power and use a High Performance power plan for benchmarking" "INFO"
+
+        # Offer quick actions: open Settings, list current per-app GPU prefs, or set one now
+        Write-Log "Quick actions: (L)ist per-app GPU preferences, (S)et preference for an app, (O)pen Graphics Settings, (N)one" "INFO"
+        $choice = Read-Host "Choose action [L/S/O/N] (default N)"
+        switch ($choice.ToUpper()) {
+            'L' {
+                $prefs = Get-UserGPUPreferences
+                if ($prefs.Count -eq 0) { Write-Log "No per-app GPU preferences found." "INFO" }
+                else {
+                    Write-Log "Per-app GPU preferences:" "INFO"
+                    foreach ($p in $prefs) { Write-Log "  $($p.App) => $($p.Value)" "INFO" }
+                }
+            }
+            'S' {
+                $app = Read-Host "Enter full path to the application executable (e.g. C:\\Games\\Game.exe)"
+                if (-not $app) { Write-Log "No application path entered, aborting." "INFO"; break }
+                if (-not (Test-Path $app)) {
+                    $ok = Read-Host "Path not found. Continue and create entry anyway? (y/N)"
+                    if (-not ($ok -and $ok -match '^[Yy]')) { Write-Log "Aborted by user." "INFO"; break }
+                }
+                Write-Log "Preference options: (1) Default, (2) PowerSaving (iGPU), (3) HighPerformance (dGPU)" "INFO"
+                $prefChoice = Read-Host "Choose preference [1/2/3] (default 3)"
+                switch ($prefChoice) { '1' { $pref='Default' } '2' { $pref='PowerSaving' } default { $pref='HighPerformance' } }
+                Write-Log "You selected: $pref for $app" "INFO"
+                $confirm = Read-Host "Apply this preference now? (y/N)"
+                if ($confirm -and $confirm -match '^[Yy]') {
+                    Set-UserGPUPreference -AppPath $app -Preference $pref -Force:$true
+                } else { Write-Log "No changes applied." "INFO" }
+            }
+            'O' {
+                try { Start-Process ms-settings:display-graphics } catch { Write-Log "Failed to open Settings: $_" "WARNING" }
+            }
+            default { Write-Log "No quick action taken." "INFO" }
+        }
+    }
+    else { Write-Log "No hybrid GPU detected (single GPU system)" "INFO" }
+}
+
+
+function Get-UserGPUPreferences {
+    $path = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+    if (-not (Test-Path $path)) { return @() }
+    try {
+        $item = Get-ItemProperty -Path $path -ErrorAction Stop
+        $props = $item.PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notmatch '^PS' }
+        $out = @()
+        foreach ($p in $props) { $out += [PSCustomObject]@{ App = $p.Name; Value = $p.Value } }
+        return $out
+    }
+    catch {
+        Write-Log "Failed to read UserGpuPreferences: $_" "WARNING"
+        return @()
+    }
+}
+
+# Set per-app GPU preference. Preference values: Default (0), PowerSaving (1), HighPerformance (2)
+function Set-UserGPUPreference {
+    param(
+        [Parameter(Mandatory=$true)][string]$AppPath,
+        [ValidateSet('Default','PowerSaving','HighPerformance')][string]$Preference = 'HighPerformance',
+        [switch]$Force
+    )
+
+    $map = @{ Default = 0; PowerSaving = 1; HighPerformance = 2 }
+    $num = $map[$Preference]
+    $regPath = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+
+    try {
+        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        $valueData = "GpuPreference=$num"
+        if (-not $Force) {
+            $ok = Read-Host "About to write registry entry: $AppPath => $valueData. Continue? (y/N)"
+            if (-not ($ok -and $ok -match '^[Yy]')) { Write-Log "User aborted setting GPU preference." "INFO"; return $false }
+        }
+        Set-ItemProperty -Path $regPath -Name $AppPath -Value $valueData -Type String -Force
+        Write-Log "Set GPU preference for $AppPath to $Preference" "SUCCESS"
+        Write-Log "Note: Changes may take effect after next launch of the application or a sign-out/sign-in." "INFO"
+        return $true
+    }
+    catch {
+        Write-Log "Failed to set GPU preference: $_" "ERROR"
+        return $false
+    }
+}
+
+# Remove per-app GPU preference entry
+function Remove-UserGPUPreference {
+    param([Parameter(Mandatory=$true)][string]$AppPath)
+    $regPath = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+    try {
+        if (-not (Test-Path $regPath)) { Write-Log "UserGpuPreferences not present." "INFO"; return $false }
+        if (-not (Get-ItemProperty -Path $regPath -Name $AppPath -ErrorAction SilentlyContinue)) { Write-Log "No entry for $AppPath found." "INFO"; return $false }
+        $ok = Read-Host "Remove GPU preference entry for $AppPath? (y/N)"
+        if (-not ($ok -and $ok -match '^[Yy]')) { Write-Log "User aborted removal." "INFO"; return $false }
+        Remove-ItemProperty -Path $regPath -Name $AppPath -ErrorAction Stop
+        Write-Log "Removed GPU preference for $AppPath" "SUCCESS"
+        return $true
+    }
+    catch {
+        Write-Log "Failed to remove GPU preference: $_" "ERROR"
+        return $false
     }
 }
 
@@ -2509,6 +2666,17 @@ function Invoke-CPUBenchmark {
     Write-Log "  System Responsiveness:     $(if ($systemResponsiveness) { '[OK] OPTIMIZED' } else { '[X] Not Optimized' })" "INFO"
     Write-Log "  Timer Resolution Enhanced: $(if ($timerResolution) { '[OK] OPTIMIZED' } else { '[X] Not Optimized' })" "INFO"
     Write-Log "" "INFO"
+
+    # Check for hybrid GPU systems and warn user before running benchmarks
+    try {
+        $hybridInfo = Test-HybridGPU
+        if ($hybridInfo.IsHybrid) {
+            Show-HybridGPUGuidance -HybridInfo $hybridInfo
+        }
+    }
+    catch {
+        Write-Log "Hybrid GPU check failed: $_" "WARNING"
+    }
     
     try {
         $cpu = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
@@ -2614,6 +2782,7 @@ function Invoke-CPUBenchmark {
                     }
                 }
             }
+        }
         # Create runspace pool with one runspace per logical processor
         $numCores = $cpu.NumberOfLogicalProcessors
         $runspacePool = [runspacefactory]::CreateRunspacePool(1, $numCores)
