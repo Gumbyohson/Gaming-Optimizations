@@ -580,6 +580,21 @@ function Protect-RegistryBackups {
     }
 }
 
+# Helper: convert human speed values with prefixes to Mbps
+function Convert-SpeedToMbps {
+    param(
+        [Parameter(Mandatory = $true)][double]$Value,
+        [string]$Prefix
+    )
+    $prefixValue = if ([string]::IsNullOrEmpty($Prefix)) { '' } else { $Prefix }
+    switch ($prefixValue.ToUpperInvariant()) {
+        'G' { return [math]::Round($Value * 1000, 1) }
+        'M' { return [math]::Round($Value, 1) }
+        'K' { return [math]::Round($Value / 1000, 2) }
+        default { return [math]::Round($Value, 1) }
+    }
+}
+
 # Get the list of keys that were newly created during optimization (for rollback)
 function Get-TrackedNewKeys {
     param([string]$BackupFile)
@@ -2235,71 +2250,7 @@ function Optimize-VisualEffects {
         # Disable specific visual effects that impact gaming performance
         $path2 = "HKCU:\Control Panel\Desktop"
         
-        # GPU-specific recommendations
-        function Show-GPURecommendations {
-            $gpuMans = Get-GPUManufacturers
-
-            Write-Log "" "INFO"
-            Write-Log "========================================" "INFO"
-            Write-Log "GPU-Specific Recommendations" "INFO"
-            Write-Log "========================================" "INFO"
-
-            if (-not $gpuMans -or $gpuMans.Count -eq 0) {
-                Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
-                return
-            }
-
-            foreach ($gpuMan in $gpuMans) {
-                switch ($gpuMan) {
-                    'NVIDIA' {
-                        Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
-                        Write-Log "" "INFO"
-                        Write-Log "NVIDIA Control Panel Settings:" "INFO"
-                        Write-Log "  - Enable G-SYNC (if supported)" "INFO"
-                        Write-Log "  - Low Latency Mode: On" "INFO"
-                        Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
-                        Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
-                        Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
-                        Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
-                        Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
-                        Write-Log "" "INFO"
-                        Write-Log "In-Game Settings:" "INFO"
-                        Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
-                        Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
-                        Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-                        Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
-                    }
-                    'AMD' {
-                        Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
-                        Write-Log "" "INFO"
-                        Write-Log "AMD Adrenalin Software Settings:" "INFO"
-                        Write-Log "  - Enable FreeSync (if supported)" "INFO"
-                        Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
-                        Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
-                        Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
-                        Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
-                        Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
-                        Write-Log "" "INFO"
-                        Write-Log "In-Game Settings:" "INFO"
-                        Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
-                        Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
-                        Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-                        Write-Log "  - Disable in-game V-Sync" "INFO"
-                        Write-Log "" "INFO"
-                        Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
-                        Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
-                    }
-                    'Intel' {
-                        Write-Log "Intel GPU detected" "INFO"
-                        Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
-                        Write-Log "  - Configure Intel Graphics Command Center for gaming" "INFO"
-                    }
-                    default {
-                        Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
-                    }
-                }
-            }
-        }
+        # GPU-specific recommendations moved to top-level `Show-GPURecommendations`
 
         # Get all physical disks
         $physicalDisks = Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size, @{
@@ -2559,6 +2510,77 @@ function Show-GPURecommendations {
     }
 
     Write-Log "========================================" "INFO"
+}
+
+# Show MSI Mode information (best-effort detection)
+function Show-MSIModeInfo {
+    Write-Log "" "INFO"
+    Write-Log "========================================" "INFO"
+    Write-Log "MSI Mode Information (best-effort)" "INFO"
+    Write-Log "========================================" "INFO"
+
+    if (-not (Test-Administrator)) {
+        Write-Log "MSI detection requires administrative privileges; run the script elevated." "WARNING"
+        return $false
+    }
+
+    try {
+        $pciDevices = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI*' } | Sort-Object -Property FriendlyName
+        if (-not $pciDevices -or $pciDevices.Count -eq 0) {
+            Write-Log "No PCI devices found to inspect." "INFO"
+            return $true
+        }
+
+        $found = @()
+        foreach ($dev in $pciDevices) {
+            $inst = $dev.InstanceId
+            $friendly = if ($dev.FriendlyName) { $dev.FriendlyName } else { $dev.InstanceId }
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$inst\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties"
+
+            if (Test-Path $regPath) {
+                $props = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+                $valSummary = @()
+                foreach ($p in $props.PSObject.Properties) {
+                    if ($p.Name -notin @('PSPath','PSParentPath','PSChildName','PSDrive','PSProvider')) {
+                        $valSummary += "$($p.Name)=$($p.Value)"
+                    }
+                }
+                Write-Log "[MSI KEY] $friendly -> $inst" "INFO"
+                if ($valSummary.Count -gt 0) { Write-Log "    Properties: $($valSummary -join '; ')" "INFO" }
+                else { Write-Log "    MessageSignaledInterruptProperties key exists (no named values)" "INFO" }
+
+                $found += $dev
+                continue
+            }
+
+            # Heuristic: some drivers set MSI-related values under Device Parameters
+            $altPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$inst\Device Parameters"
+            if (Test-Path $altPath) {
+                $altProps = Get-ItemProperty -Path $altPath -ErrorAction SilentlyContinue
+                $msiVals = $altProps.PSObject.Properties | Where-Object { $_.Name -match 'MSI|MSISupported|MessageSignaled' }
+                if ($msiVals) {
+                    $vals = $msiVals | ForEach-Object { "$( $_.Name )=$( $_.Value )" }
+                    Write-Log "[MSI HINT] $friendly -> $inst" "INFO"
+                    Write-Log "    Candidate values: $($vals -join '; ')" "INFO"
+                    $found += $dev
+                    continue
+                }
+            }
+
+            Write-Log "[No MSI info] $friendly -> $inst" "INFO"
+        }
+
+        Write-Log "" "INFO"
+        Write-Log "Summary: $($found.Count) device(s) with MSI-related registry entries detected (best-effort)." "INFO"
+        Write-Log "Note: Absence of these keys does NOT guarantee MSI is not in use; some drivers expose MSI information differently." "WARNING"
+        Write-Log "For definitive detection, use vendor tools, Device Manager (View -> Resources by type) or driver documentation." "INFO"
+
+        return $true
+    }
+    catch {
+        Write-Log "Failed to inspect MSI information: $_" "ERROR"
+        return $false
+    }
 }
 
 # Test applied settings
@@ -4035,22 +4057,8 @@ function Invoke-NetworkBenchmark {
         
         try {
             # Use the asheroto speedtest tool
-            Write-Host "  Internet Speed: " -ForegroundColor Cyan -NoNewline
+            Write-Log "Internet Speed:" "INFO"
             $speedStart = Get-Date
-
-            function Convert-SpeedToMbps {
-                param(
-                    [Parameter(Mandatory = $true)][double]$Value,
-                    [string]$Prefix
-                )
-                $prefixValue = if ([string]::IsNullOrEmpty($Prefix)) { '' } else { $Prefix }
-                switch ($prefixValue.ToUpperInvariant()) {
-                    'G' { return [math]::Round($Value * 1000, 1) }
-                    'M' { return [math]::Round($Value, 1) }
-                    'K' { return [math]::Round($Value / 1000, 2) }
-                    default { return [math]::Round($Value, 1) }
-                }
-            }
 
             # Run the speedtest and capture full output (not just the last lines)
             $speedtestText = (& powershell -NoProfile -Command "irm asheroto.com/speedtest | iex" 2>&1 | Out-String)
@@ -4083,16 +4091,14 @@ function Invoke-NetworkBenchmark {
                 $barLength = 40
                 $filledLength = [Math]::Round($barLength * $speedPercent / 100)
                 $finalBar = "#" * $filledLength + "." * ($barLength - $filledLength)
-                Write-Host "`r  Internet Speed: [$finalBar] Down: $([math]::Round($downloadSpeed,1)) Mbps | Up: $([math]::Round($uploadSpeed,1)) Mbps | Complete" -ForegroundColor Cyan
+                Write-Log "Internet Speed: [$finalBar] Down: $([math]::Round($downloadSpeed,1)) Mbps | Up: $([math]::Round($uploadSpeed,1)) Mbps | Complete" "INFO"
                 Write-Log "Download Speed: $([math]::Round($downloadSpeed,1)) Mbps | Upload Speed: $([math]::Round($uploadSpeed,1)) Mbps" "SUCCESS"
             } else {
-                Write-Host "`r  Internet Speed: [........................................] Speedtest skipped (optional)" -ForegroundColor Yellow
-                Write-Log "Speedtest skipped - optional test" "INFO"
+                Write-Log "Internet Speed: Speedtest skipped (optional)" "WARNING"
             }
         }
         catch {
-            Write-Host "`r  Internet Speed: [........................................] Skipped        " -ForegroundColor Yellow
-            Write-Log "Speedtest skipped - optional test" "INFO"
+            Write-Log "Internet Speed: Skipped" "WARNING"
         }
         
         # Speed rating
