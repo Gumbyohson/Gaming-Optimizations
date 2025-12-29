@@ -369,8 +369,10 @@ function Get-GravityMarkWindowsDownloadUrl {
 # Configuration
 # NOTE: Output files are saved alongside this script.
 $ResultsPath = $PSScriptRoot
-$BackupPath = "$PSScriptRoot\Gaming-Optimization-Backup-$(Get-Date -Format 'yyyyMMdd-HHmmss').reg"
-$LogPath = "$PSScriptRoot\Gaming-Optimization-Log-$(Get-Date -Format 'yyyyMMdd-HHmmss').txt"
+$script:RunTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$BackupPath = "$PSScriptRoot\Gaming-Optimization-Backup-$script:RunTimestamp.reg"
+$LogPath = "$PSScriptRoot\Gaming-Optimization-Log-$script:RunTimestamp.txt"
+if (-not $script:CurrentTelemetryTag) { $script:CurrentTelemetryTag = $null }
 
 # Resolved baseline path cache (used when baseline was archived or renamed)
 $script:ResolvedBaselinePath = $null
@@ -378,29 +380,39 @@ $script:ResolvedBaselinePath = $null
 # Helper: resolve the latest benchmark file (baseline)
 function Resolve-BaselineResultsPath {
     try {
-        # Find the most recent timestamped benchmark result (exclude "-after.json")
+        # Prefer the latest explicitly-tagged baseline (-preopt) when available
         $candidates = @()
 
-        # Check script directory
-        if (Test-Path $ResultsPath) {
-            $candidates += Get-ChildItem -Path $ResultsPath -Filter 'Gaming-Optimization-Benchmark-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*-after.json' }
+        # Helper to collect files from a folder
+        function Collect-BenchmarksFrom($folder) {
+            if (Test-Path $folder) {
+                return Get-ChildItem -Path $folder -Filter 'Gaming-Optimization-Benchmark-*.json' -File -ErrorAction SilentlyContinue
+            }
+            return @()
         }
 
-        # Check Archive directory
+        $candidates += Collect-BenchmarksFrom -folder $ResultsPath
         $archiveDir = Join-Path $ResultsPath 'Archive'
-        if (Test-Path $archiveDir) {
-            $candidates += Get-ChildItem -Path $archiveDir -Filter 'Gaming-Optimization-Benchmark-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*-after.json' }
-        }
+        $candidates += Collect-BenchmarksFrom -folder $archiveDir
 
         if ($candidates -and $candidates.Count -gt 0) {
-            $latest = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($latest) {
-                # Validate file: must be non-empty and valid JSON with expected structure
-                if ($latest.Length -gt 50) { # Arbitrary small size check
-                    $results = Import-BenchmarkResults -FilePath $latest.FullName
-                    if ($results -and $results.Results) {
-                        return $latest.FullName
+            # Prefer files explicitly marked as pre-optimization
+            $preopts = $candidates | Where-Object { $_.Name -match '\-preopt\.json$' } | Sort-Object LastWriteTime -Descending
+            if ($preopts -and $preopts.Count -gt 0) {
+                foreach ($cand in $preopts) {
+                    if ($cand.Length -gt 50) {
+                        $results = Import-BenchmarkResults -FilePath $cand.FullName
+                        if ($results -and $results.Results) { return $cand.FullName }
                     }
+                }
+            }
+
+            # Fallback: choose the latest non-after timestamped result
+            $fallback = $candidates | Where-Object { $_.Name -notlike '*-after.json' } | Sort-Object LastWriteTime -Descending
+            foreach ($cand in $fallback) {
+                if ($cand.Length -gt 50) {
+                    $results = Import-BenchmarkResults -FilePath $cand.FullName
+                    if ($results -and $results.Results) { return $cand.FullName }
                 }
             }
         }
@@ -452,11 +464,22 @@ function Write-Log {
         }
     }
     
-    # Write to log file with error handling
-    try {
-        Add-Content -Path $LogPath -Value $logMessage -ErrorAction Stop
-    } catch {
-        Write-Host "WARNING: Could not write to log file: $_" -ForegroundColor Yellow
+    # Write to log file with retry-on-share-violation to handle sync clients (Google Drive, OneDrive)
+    $maxAttempts = 6
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Add-Content -Path $LogPath -Value $logMessage -ErrorAction Stop
+            break
+        }
+        catch {
+            if ($attempt -ge $maxAttempts) {
+                Write-Host "WARNING: Could not write to log file after $maxAttempts attempts: $_" -ForegroundColor Yellow
+            }
+            else {
+                $sleepMs = [int](100 * [math]::Pow(2, $attempt - 1))
+                Start-Sleep -Milliseconds $sleepMs
+            }
+        }
     }
     
     # Also write to verbose stream if -Verbose is enabled
@@ -2212,65 +2235,72 @@ function Optimize-VisualEffects {
         # Disable specific visual effects that impact gaming performance
         $path2 = "HKCU:\Control Panel\Desktop"
         
-        # Disable animations
-        Set-UserRegistryValue -Path $path2 -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary
-        
-        # Disable menu show delay
-        Set-UserRegistryValue -Path $path2 -Name "MenuShowDelay" -Value 0 -Type String
-        
-        $path3 = "HKCU:\Control Panel\Desktop\WindowMetrics"
-        if (-not (Test-Path $path3)) {
-            New-Item -Path $path3 -Force | Out-Null
+        # GPU-specific recommendations
+        function Show-GPURecommendations {
+            $gpuMans = Get-GPUManufacturers
+
+            Write-Log "" "INFO"
+            Write-Log "========================================" "INFO"
+            Write-Log "GPU-Specific Recommendations" "INFO"
+            Write-Log "========================================" "INFO"
+
+            if (-not $gpuMans -or $gpuMans.Count -eq 0) {
+                Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+                return
+            }
+
+            foreach ($gpuMan in $gpuMans) {
+                switch ($gpuMan) {
+                    'NVIDIA' {
+                        Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
+                        Write-Log "" "INFO"
+                        Write-Log "NVIDIA Control Panel Settings:" "INFO"
+                        Write-Log "  - Enable G-SYNC (if supported)" "INFO"
+                        Write-Log "  - Low Latency Mode: On" "INFO"
+                        Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
+                        Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
+                        Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
+                        Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
+                        Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
+                        Write-Log "" "INFO"
+                        Write-Log "In-Game Settings:" "INFO"
+                        Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
+                        Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
+                        Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                        Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
+                    }
+                    'AMD' {
+                        Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
+                        Write-Log "" "INFO"
+                        Write-Log "AMD Adrenalin Software Settings:" "INFO"
+                        Write-Log "  - Enable FreeSync (if supported)" "INFO"
+                        Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
+                        Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
+                        Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
+                        Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
+                        Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
+                        Write-Log "" "INFO"
+                        Write-Log "In-Game Settings:" "INFO"
+                        Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
+                        Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
+                        Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                        Write-Log "  - Disable in-game V-Sync" "INFO"
+                        Write-Log "" "INFO"
+                        Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
+                        Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
+                    }
+                    'Intel' {
+                        Write-Log "Intel GPU detected" "INFO"
+                        Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
+                        Write-Log "  - Configure Intel Graphics Command Center for gaming" "INFO"
+                    }
+                    default {
+                        Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+                    }
+                }
+            }
         }
-        
-        # Disable window animations
-        Set-UserRegistryValue -Path $path3 -Name "MinAnimate" -Value 0 -Type String
-        
-        Write-Log "Visual effects optimized for gaming" "SUCCESS"
-        Write-Log "Note: Restart required for all changes to take effect" "INFO"
-        Write-Log "Note: You can fine-tune in: System Properties -> Performance Settings -> Visual Effects" "INFO"
-        return $true
-    }
-    catch {
-        Write-Log "Failed to optimize visual effects: $_" "ERROR"
-        return $false
-    }
-}
 
-# Show MSI Mode information (requires manual configuration)
-function Show-MSIModeInfo {
-    Write-Log "" "INFO"
-    Write-Log "========================================" "INFO"
-    Write-Log "MSI (Message Signaled Interrupts) Mode" "INFO"
-    Write-Log "========================================" "INFO"
-    
-    Write-Log "" "INFO"
-    Write-Log "MSI Mode can reduce latency by improving interrupt handling." "INFO"
-    Write-Log "However, it requires manual configuration per device." "INFO"
-    Write-Log "" "INFO"
-    Write-Log "Recommended Tool: MSI Utility v3 or MSI Mode Utility" "INFO"
-    Write-Log "Download from: https://forums.guru3d.com/threads/windows-line-based-vs-message-signaled-based-interrupts-msi-tool.378044/" "INFO"
-    Write-Log "" "INFO"
-    Write-Log "What to enable MSI Mode on:" "INFO"
-    Write-Log "  [YES] GPU (Graphics Card)" "INFO"
-    Write-Log "  [YES] NVMe Drives" "INFO"
-    Write-Log "  [YES] USB Controllers (if causing issues)" "INFO"
-    Write-Log "  [AVOID] SATA controllers, audio devices (can cause issues)" "INFO"
-    Write-Log "" "INFO"
-    Write-Log "[WARNING] Incorrect MSI Mode settings can cause system instability!" "WARNING"
-    Write-Log "[WARNING] Research each device before enabling MSI Mode" "WARNING"
-    Write-Log "[WARNING] Create a system restore point before making changes" "WARNING"
-    Write-Log "" "INFO"
-}
-
-# Check disk space and storage configuration
-function Get-DiskSpaceInfo {
-    Write-Log "" "INFO"
-    Write-Log "========================================" "INFO"
-    Write-Log "Disk Space and Storage Analysis" "INFO"
-    Write-Log "========================================" "INFO"
-    
-    try {
         # Get all physical disks
         $physicalDisks = Get-PhysicalDisk | Select-Object FriendlyName, MediaType, Size, @{
             Name = "SizeGB"
@@ -2328,8 +2358,8 @@ function Get-DiskSpaceInfo {
         return $ssdDrives
     }
     catch {
-        Write-Log "Failed to analyze disk space: $_" "ERROR"
-        return @()
+        Write-Log "Failed to optimize visual effects: $_" "ERROR"
+        return $false
     }
 }
 
@@ -2375,25 +2405,25 @@ function Optimize-PageFile {
             }
         }
         
-        # Get SSD drives from physical disks
+        # Get SSD drives from system disks (use Get-Disk which exposes DiskNumber reliably)
         $ssdDrives = @()
         try {
-            $physicalDisks = Get-PhysicalDisk | Where-Object { $_.MediaType -eq 'SSD' -or $_.BusType -eq 'NVMe' }
-            if ($physicalDisks) {
-                # Map physical SSDs to drive letters via partitions
-                foreach ($pd in $physicalDisks) {
-                    $partitions = Get-Disk -Number $pd.ObjectNumber -ErrorAction SilentlyContinue | Get-Partition -ErrorAction SilentlyContinue
-                    foreach ($part in $partitions) {
-                        if ($part.DriveLetter) {
-                            $volume = Get-Volume -DriveLetter $part.DriveLetter -ErrorAction SilentlyContinue
-                            if ($volume -and $volume.Size -gt 0) {
-                                $ssdDrives += [PSCustomObject]@{
-                                    DriveLetter = $part.DriveLetter
-                                    SizeGB = [math]::Round($volume.Size / 1GB, 2)
-                                    FreeGB = [math]::Round($volume.SizeRemaining / 1GB, 2)
-                                    PercentFree = [math]::Round(($volume.SizeRemaining / $volume.Size) * 100, 1)
-                                    IsNVMe = $pd.BusType -eq 'NVMe'
-                                }
+            $disks = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq 'SSD' -or $_.BusType -eq 'NVMe' }
+            foreach ($d in $disks) {
+                if (-not $d -or $d.Number -eq $null) {
+                    continue
+                }
+                $parts = Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue
+                foreach ($part in $parts) {
+                    if ($part -and $part.DriveLetter) {
+                        $volume = Get-Volume -DriveLetter $part.DriveLetter -ErrorAction SilentlyContinue
+                        if ($volume -and $volume.Size -gt 0) {
+                            $ssdDrives += [PSCustomObject]@{
+                                DriveLetter = $part.DriveLetter
+                                SizeGB = [math]::Round($volume.Size / 1GB, 2)
+                                FreeGB = [math]::Round($volume.SizeRemaining / 1GB, 2)
+                                PercentFree = [math]::Round(($volume.SizeRemaining / $volume.Size) * 100, 1)
+                                IsNVMe = $d.BusType -eq 'NVMe'
                             }
                         }
                     }
@@ -2465,62 +2495,69 @@ function Optimize-PageFile {
 
 # GPU-specific recommendations
 function Show-GPURecommendations {
-    $gpuMan = Get-GPUManufacturer
-    
+    $gpuMans = Get-GPUManufacturers
+
     Write-Log "" "INFO"
     Write-Log "========================================" "INFO"
     Write-Log "GPU-Specific Recommendations" "INFO"
     Write-Log "========================================" "INFO"
-    
-    switch ($gpuMan) {
-        'NVIDIA' {
-            Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
-            Write-Log "" "INFO"
-            Write-Log "NVIDIA Control Panel Settings:" "INFO"
-            Write-Log "  - Enable G-SYNC (if supported)" "INFO"
-            Write-Log "  - Low Latency Mode: On" "INFO"
-            Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
-            Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
-            Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
-            Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
-            Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
-            Write-Log "" "INFO"
-            Write-Log "In-Game Settings:" "INFO"
-            Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
-            Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
-            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-            Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
-        }
-        'AMD' {
-            Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
-            Write-Log "" "INFO"
-            Write-Log "AMD Adrenalin Software Settings:" "INFO"
-            Write-Log "  - Enable FreeSync (if supported)" "INFO"
-            Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
-            Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
-            Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
-            Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
-            Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
-            Write-Log "" "INFO"
-            Write-Log "In-Game Settings:" "INFO"
-            Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
-            Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
-            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-            Write-Log "  - Disable in-game V-Sync" "INFO"
-            Write-Log "" "INFO"
-            Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
-            Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
-        }
-        'Intel' {
-            Write-Log "Intel ARC GPU detected" "INFO"
-            Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
-            Write-Log "  - Configure Intel Arc Control for gaming" "INFO"
-        }
-        default {
-            Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+
+    if (-not $gpuMans -or $gpuMans.Count -eq 0) {
+        Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+        return
+    }
+
+    foreach ($gpuMan in $gpuMans) {
+        switch ($gpuMan) {
+            'NVIDIA' {
+                Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
+                Write-Log "" "INFO"
+                Write-Log "NVIDIA Control Panel Settings:" "INFO"
+                Write-Log "  - Enable G-SYNC (if supported)" "INFO"
+                Write-Log "  - Low Latency Mode: On" "INFO"
+                Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
+                Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
+                Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
+                Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
+                Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
+                Write-Log "" "INFO"
+                Write-Log "In-Game Settings:" "INFO"
+                Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
+                Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
+                Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
+            }
+            'AMD' {
+                Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
+                Write-Log "" "INFO"
+                Write-Log "AMD Adrenalin Software Settings:" "INFO"
+                Write-Log "  - Enable FreeSync (if supported)" "INFO"
+                Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
+                Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
+                Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
+                Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
+                Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
+                Write-Log "" "INFO"
+                Write-Log "In-Game Settings:" "INFO"
+                Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
+                Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
+                Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
+                Write-Log "  - Disable in-game V-Sync" "INFO"
+                Write-Log "" "INFO"
+                Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
+                Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
+            }
+            'Intel' {
+                Write-Log "Intel GPU detected" "INFO"
+                Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
+                Write-Log "  - Configure Intel Graphics Command Center for gaming" "INFO"
+            }
+            default {
+                Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
+            }
         }
     }
-    
+
     Write-Log "========================================" "INFO"
 }
 
@@ -2711,10 +2748,11 @@ function Invoke-CPUBenchmark {
         $testDuration = 20  # Duration in seconds
         $peakClockSpeed = 0
         # Telemetry log for per-interval data (multiple writes per second)
-        $cpuLogTimestamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+        $cpuLogTimestamp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format "yyyyMMdd-HHmmss-fff" }
         $resultsDir = $ResultsPath
         if (-not (Test-Path $resultsDir)) { New-Item -ItemType Directory -Path $resultsDir -Force | Out-Null }
-        $cpuTelemetryLog = Join-Path $resultsDir "CPU-Load-Telemetry-$cpuLogTimestamp.csv"
+        $tag = if ($script:CurrentTelemetryTag) { $script:CurrentTelemetryTag } else { '' }
+        $cpuTelemetryLog = Join-Path $resultsDir ("CPU-Load-Telemetry-$cpuLogTimestamp$($tag).csv")
         "timestamp_utc,elapsed_s,display_ops_per_sec,clock_mhz,iterations_est" | Set-Content -Path $cpuTelemetryLog -Encoding UTF8
         $currentIterations = 0
         $lastClockMHz = 0
@@ -2722,67 +2760,28 @@ function Invoke-CPUBenchmark {
         # Create a scriptblock for the CPU stress work - each runspace runs this independently
         $stressBlock = {
             param($Duration, $SyncHash, $ThreadId)
-            $gpuMans = Get-GPUManufacturers
-            Write-Log "" "INFO"
-            Write-Log "========================================" "INFO"
-            Write-Log "GPU-Specific Recommendations" "INFO"
-            Write-Log "========================================" "INFO"
-            if ($gpuMans.Count -eq 0) {
-                Write-Log "No GPUs detected." "WARNING"
-            } else {
-                Write-Log "Detected GPU(s): $($gpuMans -join ', ')" "INFO"
-                foreach ($gpuMan in $gpuMans) {
-                    switch ($gpuMan) {
-                        'NVIDIA' {
-                            Write-Log "NVIDIA GPU detected - Additional optimizations to configure manually:" "INFO"
-                            Write-Log "" "INFO"
-                            Write-Log "NVIDIA Control Panel Settings:" "INFO"
-                            Write-Log "  - Enable G-SYNC (if supported)" "INFO"
-                            Write-Log "  - Low Latency Mode: On" "INFO"
-                            Write-Log "  - Max Frame Rate: Set based on your monitor refresh rate" "INFO"
-                            Write-Log "    (e.g., 120Hz = 116fps, 144Hz = 138fps, 165Hz = 157fps)" "INFO"
-                            Write-Log "  - Power Management: Normal or Optimal Power" "INFO"
-                            Write-Log "  - Vertical Sync: On (works with G-SYNC, not traditional V-Sync)" "INFO"
-                            Write-Log "  - Shader Cache: 10GB minimum (100GB if 1TB+ storage)" "INFO"
-                            Write-Log "" "INFO"
-                            Write-Log "In-Game Settings:" "INFO"
-                            Write-Log "  - Enable NVIDIA Reflex when available" "INFO"
-                            Write-Log "  - Enable DLSS 3+ for massive performance gains" "INFO"
-                            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-                            Write-Log "  - Disable in-game V-Sync (controlled by driver)" "INFO"
-                        }
-                        'AMD' {
-                            Write-Log "AMD GPU detected - Additional optimizations to configure manually:" "INFO"
-                            Write-Log "" "INFO"
-                            Write-Log "AMD Adrenalin Software Settings:" "INFO"
-                            Write-Log "  - Enable FreeSync (if supported)" "INFO"
-                            Write-Log "  - Radeon Anti-Lag: Enabled" "INFO"
-                            Write-Log "  - Radeon Boost: Enabled (if desired)" "INFO"
-                            Write-Log "  - Radeon Chill: Disabled for competitive gaming" "INFO"
-                            Write-Log "  - Wait for Vertical Refresh: Enhanced Sync" "INFO"
-                            Write-Log "  - Frame Rate Target Control: Set based on monitor" "INFO"
-                            Write-Log "" "INFO"
-                            Write-Log "In-Game Settings:" "INFO"
-                            Write-Log "  - Enable AMD FSR 3+ when available" "INFO"
-                            Write-Log "  - Enable AMD Anti-Lag+ when available" "INFO"
-                            Write-Log "  - Use Borderless Fullscreen mode when possible" "INFO"
-                            Write-Log "  - Disable in-game V-Sync" "INFO"
-                            Write-Log "" "INFO"
-                            Write-Log "Reference: Guide mentions AMD optimization video at" "INFO"
-                            Write-Log "  https://youtu.be/rY-lH6yDlK0" "INFO"
-                        }
-                        'Intel' {
-                            Write-Log "Intel GPU detected" "INFO"
-                            Write-Log "  - Ensure latest Intel Graphics drivers installed" "INFO"
-                            Write-Log "  - Configure Intel Graphics Command Center for gaming" "INFO"
-                        }
-                        default {
-                            Write-Log "Unknown GPU manufacturer - manual configuration recommended" "WARNING"
-                        }
-                    }
+            $loopStart = [DateTime]::UtcNow
+            $iterations = 0
+            $lastUpdate = [DateTime]::UtcNow
+
+            while (([DateTime]::UtcNow - $loopStart).TotalSeconds -lt $Duration) {
+                for ($k = 0; $k -lt 10000; $k++) {
+                    $null = [Math]::Sqrt($k * $k + 1)
+                    $iterations++
+                }
+
+                if (([DateTime]::UtcNow - $lastUpdate).TotalMilliseconds -ge 100) {
+                    $SyncHash["Thread_$ThreadId"] = $iterations
+                    $lastUpdate = [DateTime]::UtcNow
                 }
             }
+
+            $SyncHash["Thread_${ThreadId}_Final"] = $iterations
         }
+
+        # Initialize synchronized hashtable used by runspaces
+        $syncHash = [hashtable]::Synchronized(@{})
+        $syncHash['TotalIterations'] = 0
         # Create runspace pool with one runspace per logical processor
         $numCores = $cpu.NumberOfLogicalProcessors
         $runspacePool = [runspacefactory]::CreateRunspacePool(1, $numCores)
@@ -2836,8 +2835,20 @@ function Invoke-CPUBenchmark {
                 }
             }
             
-            # Read current total iterations from synchronized hashtable
-            $currentIterations = $syncHash['TotalIterations']
+            # Read current total iterations by summing per-thread counters using known thread indices
+            $currentIterations = 0
+            try {
+                for ($ti = 0; $ti -lt $numCores; $ti++) {
+                    $k = "Thread_$ti"
+                    if ($syncHash.ContainsKey($k)) {
+                        $v = $syncHash[$k]
+                        if ($null -ne $v) { $currentIterations += [int]$v }
+                    }
+                }
+            } catch {
+                # In case of a transient concurrency issue, fall back to zero for this sample and continue
+                $currentIterations = 0
+            }
             
             # Capture iterations at 2-second mark to skip spin-up period
             if (-not $captured2SecondMark -and $elapsed -ge 2.0) {
@@ -3821,10 +3832,11 @@ function Invoke-NetworkBenchmark {
         $totalLatency = 0
         $successCount = 0
         $allResults = @()
-        $netLogTimestamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+        $netLogTimestamp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format "yyyyMMdd-HHmmss-fff" }
         $netResultsDir = $ResultsPath
         if (-not (Test-Path $netResultsDir)) { New-Item -ItemType Directory -Path $netResultsDir -Force | Out-Null }
-        $netLogFile = Join-Path $netResultsDir "Network-Latency-$netLogTimestamp.csv"
+        $netTag = if ($script:CurrentTelemetryTag) { $script:CurrentTelemetryTag } else { '' }
+        $netLogFile = Join-Path $netResultsDir ("Network-Latency-$netLogTimestamp$($netTag).csv")
         "timestamp_utc,server,method,latency_ms,success" | Set-Content -Path $netLogFile -Encoding UTF8
         
         foreach ($server in $testServers) {
@@ -4900,39 +4912,100 @@ function Invoke-GPURenderingBenchmark {
 
                 # GravityMark uses single-dash options (from manual + installed run_*.bat files).
                 # NOTE: -times must be a filename relative to WorkingDirectory (absolute paths are not reliably created).
-                $gravityTimesName = "GravityMark_times_$([Guid]::NewGuid().ToString('N')).csv"
+                $gmTag = if ($script:CurrentTelemetryTag) { $script:CurrentTelemetryTag } else { '' }
+                $gmPrefix = if ($script:RunTimestamp) { "GravityMark_times_$script:RunTimestamp" } else { "GravityMark_times_$([Guid]::NewGuid().ToString('N'))" }
+                $gravityTimesName = "$gmPrefix-$([Guid]::NewGuid().ToString('N'))$($gmTag).csv"
                 $gravityBin = Split-Path $gravityExe.FullName -Parent
                 $gravityTimesPath = Join-Path $gravityBin $gravityTimesName
 
                 # Manual renderer flag is -direct3d12 (short aliases may exist, but use documented option).
                 $native = Get-PrimaryMonitorResolution
-                $gmArgs = @(
-                    '-direct3d12',
-                    '-benchmark', '1',
-                    '-close', '1',
-                    '-status', '1',
-                    '-count', '1',
-                    '-fullscreen', '1',
-                    '-fps', '0',
-                    '-info', '0',
-                    '-sensors', '0',
-                    '-width', [string]$native.Width,
-                    '-height', [string]$native.Height,
-                    '-times', $gravityTimesName
-                )
 
-                $gmInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $gmInfo.FileName = $gravityExe.FullName
-                $gmInfo.Arguments = $gmArgs -join " "
-                # GravityMark loads ../data.zip; run from bin folder.
-                $gmInfo.WorkingDirectory = $gravityBin
-                $gmInfo.UseShellExecute = $false
-                $gmInfo.RedirectStandardOutput = $true
-                $gmInfo.RedirectStandardError = $true
-                $gmInfo.CreateNoWindow = $true
-                $gmInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized
+                # Attempt GravityMark, retrying up to twice with progressively reduced memory settings if OOM occurs.
+                $gmAttempt = 0
+                $gmProcess = $null
+                $gmStdout = ""
+                $gmStderr = ""
+                while ($gmAttempt -lt 3) {
+                    $gmAttempt++
+                    switch ($gmAttempt) {
+                        1 {
+                            # Native fullscreen (best fidelity) - try Direct3D12 first
+                            $width = [string]$native.Width
+                            $height = [string]$native.Height
+                            $fullscreen = '1'
+                            $rendererFlag = '-direct3d12'
+                        }
+                        2 {
+                            # First fallback: try Direct3D11 at native resolution
+                            $width = [string]$native.Width
+                            $height = [string]$native.Height
+                            $fullscreen = '1'
+                            $rendererFlag = '-direct3d11'
+                            Write-Log "GravityMark fallback: attempt 2 - try Direct3D11 renderer" "WARNING"
+                        }
+                        3 {
+                            # Aggressive fallback: reduced resolution 640x360 windowed (very low memory use), use Direct3D11
+                            $width = '640'
+                            $height = '360'
+                            $fullscreen = '0'
+                            $rendererFlag = '-direct3d11'
+                            Write-Log "GravityMark fallback: attempt 3 - 640x360 windowed (aggressive) using D3D11" "WARNING"
+                        }
+                    }
 
-                $gmProcess = [System.Diagnostics.Process]::Start($gmInfo)
+                    $gmArgs = @(
+                        $rendererFlag,
+                        '-benchmark', '1',
+                        '-close', '1',
+                        '-status', '1',
+                        '-count', '1',
+                        '-fullscreen', $fullscreen,
+                        '-fps', '0',
+                        '-info', '0',
+                        '-sensors', '0',
+                        '-width', $width,
+                        '-height', $height,
+                        '-times', $gravityTimesName
+                    )
+
+                    $gmInfo = New-Object System.Diagnostics.ProcessStartInfo
+                    $gmInfo.FileName = $gravityExe.FullName
+                    $gmInfo.Arguments = $gmArgs -join " "
+                    # GravityMark loads ../data.zip; run from bin folder.
+                    $gmInfo.WorkingDirectory = $gravityBin
+                    $gmInfo.UseShellExecute = $false
+                    $gmInfo.RedirectStandardOutput = $true
+                    $gmInfo.RedirectStandardError = $true
+                    $gmInfo.CreateNoWindow = $true
+                    $gmInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized
+
+                    if ($gmProcess) {
+                        try { if (-not $gmProcess.HasExited) { $gmProcess.Kill() } } catch {}
+                        $gmProcess = $null
+                    }
+
+                    $gmProcess = [System.Diagnostics.Process]::Start($gmInfo)
+
+                    # Wait for completion (6 minutes) and capture output
+                    $gmCompleted = $gmProcess.WaitForExit(360000)
+                    $gmStdout = $gmProcess.StandardOutput.ReadToEnd()
+                    $gmStderr = $gmProcess.StandardError.ReadToEnd()
+
+                    # If process exited cleanly, break loop
+                    if ($gmCompleted -and $gmProcess.ExitCode -eq 0) { break }
+
+                    # If we detected out-of-memory in stderr/stdout and haven't exhausted fallbacks, retry
+                    $combined = "{0}`n{1}" -f $gmStderr, $gmStdout
+                    if ($combined -match 'out of memory' -and $gmAttempt -lt 3) {
+                        Write-Log "GravityMark reported out-of-memory; retrying with more aggressive fallback..." "WARNING"
+                        Continue
+                    }
+                    else {
+                        # No retry condition; exit loop
+                        break
+                    }
+                }
 
                 # Sample NVIDIA telemetry during the GravityMark run for accurate "Clock Load".
                 $gmTelemetry = @()
@@ -5287,7 +5360,7 @@ function Invoke-RAMBenchmark {
         $moduleDetails = @()
         
         foreach ($module in $ramModules) {
-            $moduleIndex = $ramModules.IndexOf($module) + 1
+            $moduleIndex = ([array]::IndexOf($ramModules, $module)) + 1
             $manufacturer = if ([string]::IsNullOrWhiteSpace($module.Manufacturer)) { "Unknown" } else { $module.Manufacturer.Trim() }
             $partNumber = if ([string]::IsNullOrWhiteSpace($module.PartNumber)) { "Unknown" } else { $module.PartNumber.Trim() }
             
@@ -6343,7 +6416,7 @@ function Invoke-PerformanceBenchmark {
 
         # Persist benchmark results for later comparison
         try {
-            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $timestamp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format "yyyyMMdd-HHmmss" }
             $outDir = $ResultsPath
             if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
             $outFile = Join-Path $outDir "Gaming-Optimization-Benchmark-$timestamp.json"
@@ -6410,7 +6483,7 @@ function Invoke-PerformanceBenchmark {
 
         # Persist benchmark results for later comparison
         try {
-            $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $timestamp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format "yyyyMMdd-HHmmss" }
             $outDir = $ResultsPath
             if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
             $outFile = Join-Path $outDir "Gaming-Optimization-Benchmark-$timestamp.json"
@@ -6882,11 +6955,19 @@ function Invoke-OptimizationScript {
                 Write-Log "========================================" "INFO"
                 Write-Log "Running baseline benchmarks before applying optimizations..." "INFO"
                 
+                # Tag telemetry files created during this baseline run as pre-optimization
+                $script:CurrentTelemetryTag = '-preopt'
                 $baselineResults = Invoke-PerformanceBenchmark -ReturnData
+                $script:CurrentTelemetryTag = $null
                 if ($baselineResults) {
-                    $timestampedPath = Join-Path $ResultsPath "Gaming-Optimization-Benchmark-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+                    $bp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+                    $timestampedPath = Join-Path $ResultsPath "Gaming-Optimization-Benchmark-$bp.json"
                     $saved = Save-BenchmarkResults -Results $baselineResults -FilePath $timestampedPath
-                    if (-not $saved) {
+                    if ($saved) {
+                        # Track saved baseline path so we can optionally rename it later
+                        $script:BaselineSavedPath = $timestampedPath
+                    }
+                    else {
                         Write-Log "WARNING: Failed to save baseline results. Comparison will not be available." "WARNING"
                         $baselineResults = $null
                     }
@@ -6938,7 +7019,7 @@ function Invoke-OptimizationScript {
             Write-Log "Hardware Detection" "INFO"
             Write-Log "========================================" "INFO"
             $null = Get-CPUManufacturer
-            $null = Get-GPUManufacturer
+            $null = Get-GPUManufacturers
             
             # Show feature requirements and compatibility
             Show-FeatureRequirements
@@ -7034,6 +7115,21 @@ function Invoke-OptimizationScript {
                 Write-Log "" "INFO"
                 Write-Log "This will run new benchmarks and compare them to your baseline." "INFO"
             }
+
+            # If we saved a baseline before applying optimizations and some optimizations failed,
+            # rename the baseline file to include '-preopt' so users can easily identify it.
+            if ($BenchmarkBeforeAfter -and $script:BaselineSavedPath -and (Test-Path $script:BaselineSavedPath) -and ($successCount -ne $totalCount)) {
+                try {
+                    $preoptPath = $script:BaselineSavedPath.Replace('.json','-preopt.json')
+                    Move-Item -Path $script:BaselineSavedPath -Destination $preoptPath -Force
+                    Write-Log "Baseline contained failed optimizations; renamed baseline to: $preoptPath" "INFO"
+                    # Update the saved baseline reference
+                    $script:BaselineSavedPath = $preoptPath
+                }
+                catch {
+                    Write-Log "Warning: could not rename baseline file to include -preopt: $_" "WARNING"
+                }
+            }
             
             Write-Log "`n[ALERT] IMPORTANT: Restart your computer for all changes to take effect!" "WARNING"
             
@@ -7071,11 +7167,15 @@ function Invoke-OptimizationScript {
             Write-Log "" "INFO"
             
             # Run benchmarks
+            # Tag telemetry files created during this baseline creation as pre-optimization
+            $script:CurrentTelemetryTag = '-preopt'
             $baselineResults = Invoke-PerformanceBenchmark -ReturnData
+            $script:CurrentTelemetryTag = $null
             
             if ($baselineResults) {
                 # Save baseline with timestamp
-                $timestampedPath = Join-Path $ResultsPath "Gaming-Optimization-Benchmark-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+                    $bp = if ($script:RunTimestamp) { $script:RunTimestamp } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+                    $timestampedPath = Join-Path $ResultsPath "Gaming-Optimization-Benchmark-$bp.json"
                 $saved = Save-BenchmarkResults -Results $baselineResults -FilePath $timestampedPath
                 
                 if ($saved) {
@@ -7122,7 +7222,10 @@ function Invoke-OptimizationScript {
             Write-Log "" "INFO"
             
             # Run benchmarks
+            # Tag telemetry files created during this post-optimization comparison as -postopt
+            $script:CurrentTelemetryTag = '-postopt'
             $afterResults = Invoke-PerformanceBenchmark -ReturnData
+            $script:CurrentTelemetryTag = $null
             
             if ($afterResults) {
                 # Load baseline and compare
@@ -7130,10 +7233,16 @@ function Invoke-OptimizationScript {
                 if ($baseline) {
                     Compare-BenchmarkResults -BeforeResults $baseline -AfterResults $afterResults
                     
-                    # Save after results next to baseline
-                    $afterPath = $baselinePath.Replace(".json", "-after.json")
+                    # Save after results next to baseline. If the baseline was renamed to -preopt,
+                    # save the post-optimization results with -postopt so the pair is obvious.
+                    if ($baselinePath -match "-preopt\.json$") {
+                        $afterPath = $baselinePath.Replace('-preopt.json','-postopt.json')
+                    }
+                    else {
+                        $afterPath = $baselinePath.Replace('.json', '-after.json')
+                    }
                     Save-BenchmarkResults -Results $afterResults -FilePath $afterPath | Out-Null
-                    
+
                     Write-Log "" "INFO"
                     Write-Log "After-optimization results saved to: $afterPath" "SUCCESS"
                 } else {

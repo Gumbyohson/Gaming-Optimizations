@@ -401,3 +401,6 @@ FodyWeavers.xsd
 *.sln.iml
 
 *.json
+*.txt
+*.reg
+*.csv
