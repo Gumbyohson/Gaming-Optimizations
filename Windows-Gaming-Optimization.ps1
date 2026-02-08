@@ -1847,13 +1847,32 @@ function Enable-ExperimentalNVMe {
         
         # Enable Native NVMe feature flags for Windows 11
         # Based on: https://windowsforum.com/threads/native-nvme-i-o-path-in-windows-server-2025-and-windows-11-performance-boost.394539/
+        # SafeBoot keys from: https://github.com/SysAdminDoc/win11-nvme-driver-patcher
         # IMPORTANT: These are community-discovered values for Windows 11 (unofficial)
         # Windows Server 2025 uses different value: 1176759950
         Set-ItemProperty -Path $path -Name "735209102" -Value 1 -Type DWord
         Set-ItemProperty -Path $path -Name "1853569164" -Value 1 -Type DWord
         Set-ItemProperty -Path $path -Name "156965516" -Value 1 -Type DWord
         
-        Write-Log "Native NVMe features enabled successfully" "SUCCESS"
+        # CRITICAL: Add SafeBoot keys to enable Safe Mode boot after Native NVMe is enabled
+        # Without these keys, the system cannot boot into Safe Mode, removing a critical recovery path
+        # Reference: https://github.com/SysAdminDoc/win11-nvme-driver-patcher
+        # Uses Storage Disks class GUID to ensure ALL storage drivers (including Native NVMe) load in Safe Mode
+        $safeBootMinimalPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}"
+        $safeBootNetworkPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{75416E63-5912-4DFA-AE8F-3EFACCAFFB14}"
+        $safeBootValue = "Storage Disks"
+        
+        if (-not (Test-Path $safeBootMinimalPath)) {
+            New-Item -Path $safeBootMinimalPath -Force | Out-Null
+        }
+        Set-ItemProperty -Path $safeBootMinimalPath -Name "(Default)" -Value $safeBootValue -Type String
+        
+        if (-not (Test-Path $safeBootNetworkPath)) {
+            New-Item -Path $safeBootNetworkPath -Force | Out-Null
+        }
+        Set-ItemProperty -Path $safeBootNetworkPath -Name "(Default)" -Value $safeBootValue -Type String
+        
+        Write-Log "Native NVMe features enabled successfully (includes Safe Mode support)" "SUCCESS"
         Write-Log "" "INFO"
         Write-Log "[WARNING] IMPORTANT NOTES:" "WARNING"
         Write-Log "  - MINIMUM REQUIREMENTS:" "INFO"
