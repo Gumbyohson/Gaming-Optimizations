@@ -384,16 +384,16 @@ function Resolve-BaselineResultsPath {
         $candidates = @()
 
         # Helper to collect files from a folder
-        function Collect-BenchmarksFrom($folder) {
+        function Get-BenchmarkFilesFrom($folder) {
             if (Test-Path $folder) {
                 return Get-ChildItem -Path $folder -Filter 'Gaming-Optimization-Benchmark-*.json' -File -ErrorAction SilentlyContinue
             }
             return @()
         }
 
-        $candidates += Collect-BenchmarksFrom -folder $ResultsPath
+        $candidates += Get-BenchmarkFilesFrom -folder $ResultsPath
         $archiveDir = Join-Path $ResultsPath 'Archive'
-        $candidates += Collect-BenchmarksFrom -folder $archiveDir
+        $candidates += Get-BenchmarkFilesFrom -folder $archiveDir
 
         if ($candidates -and $candidates.Count -gt 0) {
             # Prefer files explicitly marked as pre-optimization
@@ -2266,9 +2266,6 @@ function Optimize-VisualEffects {
         }
         Set-UserRegistryValue -Path $path1 -Name "VisualFXSetting" -Value 2 -Type DWord
         
-        # Disable specific visual effects that impact gaming performance
-        $path2 = "HKCU:\Control Panel\Desktop"
-        
         # GPU-specific recommendations moved to top-level `Show-GPURecommendations`
 
         # Get all physical disks
@@ -2380,7 +2377,7 @@ function Optimize-PageFile {
         try {
             $disks = Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -eq 'SSD' -or $_.BusType -eq 'NVMe' }
             foreach ($d in $disks) {
-                if (-not $d -or $d.Number -eq $null) {
+                if ($null -eq $d -or $null -eq $d.Number) {
                     continue
                 }
                 $parts = Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue
