@@ -1,21 +1,21 @@
 # Windows 11 Gaming Optimization Suite - Consolidated Version
 
-## 🎮 All-In-One Gaming Optimization Script
+## All-In-One Gaming Optimization Script
 
 This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. Everything you need in a single PowerShell script.
 
 ---
 
-## ✨ What's Included
+## What's Included
 
-### 📊 Benchmarking (Built-In)
+### Benchmarking (Built-In)
 - CPU Performance Tests (single & multi-thread)
 - GPU Information & Capabilities
 - Network Latency Tests (ping to multiple servers)
 - Storage Speed Tests (read/write performance)
 - Export results to JSON for comparison
 
-### ⚙️ Optimizations (14+)
+### Optimizations (14+)
 1. **Win32 Priority Separation** - Gaming process priority boost
 2. **Power Throttling Disabled** - Maximum performance
 3. **DWM MPO Fix** - Display rendering optimization
@@ -32,13 +32,13 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 14. **System Cache Optimization** - More RAM for games
 15. **Native NVMe Support** - Experimental storage boost (optional)
 
-### 🖥️ Hardware-Specific
+### Hardware-Specific
 - **Intel CPU**: Power plan recommendations, ParkControl guidance
 - **AMD Ryzen**: CPPC enabled, chipset driver reminders
 - **NVIDIA GPU**: G-SYNC, DLSS, Reflex tips
 - **AMD GPU**: FreeSync, FSR, Anti-Lag+ guidance
 
-### ℹ️ Additional Guidance
+### Additional Guidance
 - MSI Mode configuration information
 - VBS/Memory Integrity disable guidance
 - Virtual Machine Platform disable option
@@ -46,7 +46,7 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Basic Optimization (with diagnostics)
 ```powershell
@@ -91,7 +91,7 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 
 ---
 
-## 📋 Complete Usage
+## Complete Usage
 
 ### Parameters
 
@@ -123,7 +123,7 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 
 ---
 
-## 📊 Benchmark Workflow
+## Benchmark Workflow
 
 ### Recommended Testing Process
 
@@ -150,7 +150,7 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 
 ---
 
-## 🎯 What Gets Optimized
+## What Gets Optimized
 
 ### Registry Keys Modified
 
@@ -177,7 +177,7 @@ This is the **consolidated, all-in-one** Windows 11 gaming optimization suite. E
 
 ---
 
-## ⚠️ Important Notes
+## Important Notes
 
 ### Restart Required
 After applying optimizations, a restart is **mandatory** for changes to take effect:
@@ -208,7 +208,7 @@ Some optimizations reduce security for performance:
 
 ---
 
-## 📁 Files Created/Modified
+## Files Created/Modified
 
 ### Backup Files (script folder)
 - `Gaming-Optimization-Backup-[timestamp].reg` - Full registry backup (never deleted by the script)
@@ -222,7 +222,7 @@ Some optimizations reduce security for performance:
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### "Access Denied" Errors
 - **Solution**: Run PowerShell as Administrator
@@ -252,7 +252,7 @@ Some optimizations reduce security for performance:
 
 ---
 
-## 📖 Research Sources
+## Research Sources
 
 This script is based on verified optimizations from:
 - P40L0's PC Gaming Optimization Guide (Patreon)
@@ -270,7 +270,7 @@ This script is based on verified optimizations from:
 
 ---
 
-## 🆚 vs. Separate Scripts
+## vs. Separate Scripts
 
 ### Why Consolidate?
 
@@ -283,15 +283,15 @@ This script is based on verified optimizations from:
 - Windows-Gaming-Optimization.ps1 (All-in-one)
 
 **Benefits**:
-- ✅ Simpler deployment (one file)
-- ✅ Integrated workflow (benchmark → optimize → test)
-- ✅ Consistent logging
-- ✅ Single backup/rollback system
-- ✅ Easier to maintain and update
+- Simpler deployment (one file)
+- Integrated workflow (benchmark → optimize → test)
+- Consistent logging
+- Single backup/rollback system
+- Easier to maintain and update
 
 ---
 
-## 🎓 Performance Expectations
+## Performance Expectations
 
 ### Realistic Improvements
 - **CPU-bound games**: 2-5% FPS increase, better frame pacing
@@ -300,36 +300,36 @@ This script is based on verified optimizations from:
 - **Storage (with Native NVMe)**: Up to 80% IOPS increase
 
 ### Don't Expect Miracles
-- ❌ Won't fix low-end hardware limitations
-- ❌ Won't replace proper driver updates
-- ❌ Won't fix game-specific bugs
-- ✅ Best combined with proper GPU settings
+- Won't fix low-end hardware limitations
+- Won't replace proper driver updates
+- Won't fix game-specific bugs
+- Best combined with proper GPU settings
 
 ---
 
-## 🛡️ Safety & Reversibility
+## Safety & Reversibility
 
 ### All Changes Are Reversible
-- ✅ Registry backup created automatically
-- ✅ Rollback option via `-Action Rollback`
-- ✅ Manual registry restore available
-- ✅ System Restore compatible
+- Registry backup created automatically
+- Rollback option via `-Action Rollback`
+- Manual registry restore available
+- System Restore compatible
 
 ### Tested & Safe
-- ✅ Registry-only changes (no system files modified)
-- ✅ No driver replacements (except optional Native NVMe)
-- ✅ Based on reputable sources
-- ✅ Backup/restore functionality included
+- Registry-only changes (no system files modified)
+- No driver replacements (except optional Native NVMe)
+- Based on reputable sources
+- Backup/restore functionality included
 
 ---
 
-## 📞 Support
+## Support
 
 ### Before Asking for Help
-1. ✅ Check the log file: `Desktop\Gaming-Optimization-Log-[timestamp].txt`
-2. ✅ Verify administrator rights
-3. ✅ Review error messages
-4. ✅ Check Windows version compatibility
+1. Check the log file: `Desktop\Gaming-Optimization-Log-[timestamp].txt`
+2. Verify administrator rights
+3. Review error messages
+4. Check Windows version compatibility
 
 ### Providing Feedback
 Include:
@@ -340,17 +340,17 @@ Include:
 
 ---
 
-## ✅ Changelog
+## Changelog
 
 ### Version 2.0 (Current - All-in-One)
-- ➕ **Consolidated**: Merged 3 scripts into 1
-- ➕ **Integrated Benchmarking**: Built-in testing suite
-- ➕ Added HAGS, Game DVR disable, Timer Resolution, System Cache
-- ➕ Integrated Native NVMe (optional with `-EnableNativeNVMe`)
-- ➕ Added MSI Mode guidance
-- 🔧 Enhanced backup system (12 registry keys)
-- 🔧 Updated parameter system
-- 📚 Expanded documentation
+- **Consolidated**: Merged 3 scripts into 1
+- **Integrated Benchmarking**: Built-in testing suite
+- Added HAGS, Game DVR disable, Timer Resolution, System Cache
+- Integrated Native NVMe (optional with `-EnableNativeNVMe`)
+- Added MSI Mode guidance
+- Enhanced backup system (12 registry keys)
+- Updated parameter system
+- Expanded documentation
 
 ### Version 1.0 (Legacy - Separate Scripts)
 - Initial release with 9 optimizations
@@ -360,6 +360,6 @@ Include:
 
 ---
 
-**Enjoy your optimized gaming experience! 🎮🚀**
+**Enjoy your optimized gaming experience!**
 
 *Remember: Always benchmark before and after to verify improvements!*
